@@ -1,0 +1,604 @@
+# 1. determine calibration parameters, undistort images, 
+# 2. Produce composite gradient image, Produce perspective transform birds eye view, Determine lane lines, 
+# 3. Calculate curvature of lines
+
+
+import numpy as np
+import cv2
+import glob
+import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
+import os
+import time
+import math
+from moviepy.editor import VideoFileClip
+from IPython.display import HTML
+
+
+#allow inline video play
+%matplotlib inline
+
+#add image directories to path
+os.listdir('camera_cal/')
+os.listdir('undistorted_frames/')
+
+#################################################################
+#################read in calibration image set###################
+#################################################################
+calib_set = glob.glob('camera_cal/calibration*.jpg')
+calib_check = cv2.imread('camera_cal/calibration10.jpg')
+test_images_set = glob.glob('test_images/*.jpg')
+#test_images_set = glob.glob('test_images/test1.jpg')
+
+ym_per_pix = 3.048/170 # meters per pixel in y dimension
+xm_per_pix = 3.7/900 # meteres per pixel in x dimension
+
+print(calib_set)
+print(test_images_set)
+objpoints = [] #<--- need to define
+imgpoints = [] #<--- need to define
+
+src = np.float32([[540,500],[800,500],[300,720],[1200,720]]) #[] #<--- need to define
+dst = np.float32([[400,0],[1000,0],[400,720],[1000,720]]) #[] #<--- need to define
+
+nx = 9 #number of boxes in the x direction
+ny = 6 #number of boxes in the y direction
+
+# Threshold color channel
+#s_thresh_min = 120
+#s_thresh_max = 255
+
+# Threshold x gradient
+#thresh_min = 35
+#thresh_max = 50
+
+# Threshold color channel
+s_thresh_min = 220
+s_thresh_max = 255
+
+# Threshold x gradient
+thresh_min = 40
+thresh_max = 50
+
+
+vertices = np.array([[[350,720],[350,0],[1000,0],[1000,720]]], dtype=np.int32);
+#vertices = np.array([[[330,613],[441,546],[952,613],[854,546]]], dtype=np.int32)
+
+#vertices_left = np.array([[[350,720],[450,720],[450,0],[350,0]]], dtype=np.int32);
+#vertices_right = np.array([[[950,720],[1000,720],[1000,0],[950,0]]], dtype=np.int32);
+
+
+
+#window sliding size
+window_width = 50 
+window_height = 80 # Break image into 9 vertical layers since image height is 720
+margin = 100 # How much to slide left and right for searching
+
+
+for img in calib_set:
+    frame = cv2.imread(img)
+
+    #convert to gray scale
+    gray = cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY)
+
+    #find the chess board
+    ret, corners = cv2.findChessboardCorners(gray, (nx,ny), None)
+
+    #draw the chessboard corners
+    frame = cv2.drawChessboardCorners(frame, (nx,ny), corners, ret)
+
+    objp = np.zeros((nx*ny,3),np.float32)
+    objp[:,:2] = np.mgrid[0:nx,0:ny].T.reshape(-1,2) 
+    if ret == True:
+        imgpoints.append(corners)
+        objpoints.append(objp)
+    plt.imshow(frame)
+    plt.show()
+
+#print(imgpoints)
+#print(objpoints)
+#determine calibration distortion parameters
+
+print('Test Calibration Frame')
+
+
+ret, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(objpoints, imgpoints, calib_check.shape[1::-1], None, None)
+
+#############################################
+#debug
+#############################################
+#print(frame)
+#print(ret)
+#print(mtx)
+#print(dist)
+#print(rvecs)
+#print(tvecs)
+def calibration(calib_set, nx, ny, objpoints, imgpoints):
+    for img in calib_set:
+        frame = mpimg.imread(img)
+
+        #convert to gray scale
+        gray = cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY)
+
+        #find the chess board
+        ret, corners = cv2.findChessboardCorners(gray, (nx,ny), None)
+
+        #draw the chessboard corners
+        frame = cv2.drawChessboardCorners(frame, (nx,ny), corners, ret)
+
+        
+        objp = np.zeros((nx*ny,3),np.float32)
+        objp[:,:2] = np.mgrid[0:nx,0:ny].T.reshape(-1,2) 
+        
+        imgpoints.append(corners)
+        objpoints.append(objp)
+        
+        #determine calibration distortion parameters
+        ret, mtx, dist, rvecs, tvecs = cv2.calibrateCamera(objpoints, imgpoints, gray.shape[::-1], None, None)
+
+        #############################################
+        #debug
+        #############################################
+        #print(frame)
+        #print(ret)
+        #print(mtx)
+        #print(dist)
+        #print(rvecs)
+        #print(tvecs)
+        
+        #plt.imshow(frame)
+        #plt.show()
+        return mtx, dist, rvecs, tvecs
+        
+#######
+#######create an undistorted image set
+#######
+
+def undistort_input_images(frame, mtx, dist,rvecs,tvecs):       
+    #undistort images
+    undistorted_frame = cv2.undistort(frame, mtx, dist, None, mtx) 
+    #plt.imshow(undistorted_frame)
+    #plt.show() 
+
+    #color correcting for .imwrite
+    #undistorted_frame = cv2.cvtColor(undistorted_frame, cv2.COLOR_RGB2BGR)
+
+    #save undistorted frames
+    #cv2.imwrite(os.path.join('./undistorted_frames', frame_name), undistorted_frame)
+    return undistorted_frame
+    
+def hls_extraction(frame, s_thresh_min,s_thresh_max):
+        #determine color gradient to use for finding lines
+        #HLS image frame
+        hls = cv2.cvtColor(frame, cv2.COLOR_RGB2HLS)
+        s_channel = hls[:,:,2]
+        
+        # Threshold color channel
+        s_binary = np.zeros_like(s_channel)
+        s_binary[(s_channel >= s_thresh_min) & (s_channel <= s_thresh_max)] = 1
+        
+        print('hls_extraction')
+        plt.imshow(s_binary)
+        plt.show()
+        
+        return s_binary
+
+def region_of_interest(img, vertices):
+    """
+    Applies an image mask.
+
+    Only keeps the region of the image defined by the polygon
+    formed from `vertices`. The rest of the image is set to black.
+    """
+    #defining a blank mask to start with
+    mask = np.zeros_like(img)   
+
+    #defining a 3 channel or 1 channel color to fill the mask with depending on the input image
+    if len(img.shape) > 2:
+        channel_count = img.shape[2]  # i.e. 3 or 4 depending on your image
+        ignore_mask_color = (255,) * channel_count
+    else:
+        ignore_mask_color = 255
+
+    #filling pixels inside the polygon defined by "vertices" with the fill color    
+    cv2.fillPoly(mask, vertices, ignore_mask_color)
+
+    #returning the image only where mask pixels are nonzero
+    masked_image = cv2.bitwise_and(img, mask)
+    
+    print('Masked Image')
+    plt.imshow(masked_image)
+    plt.show()
+    
+    return masked_image
+
+def abs_sobel_thresh(img, orient, sobel_kernel, thresh):
+    # Convert to grayscale
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    # Apply x or y gradient with the OpenCV Sobel() function
+    # and take the absolute value
+    if orient == 'x':
+        abs_sobel = np.absolute(cv2.Sobel(gray, cv2.CV_64F, 1, 0))
+    if orient == 'y':
+        abs_sobel = np.absolute(cv2.Sobel(gray, cv2.CV_64F, 0, 1))
+    # Rescale back to 8 bit integer
+    scaled_sobel = np.uint8(255*abs_sobel/np.max(abs_sobel))
+    # Create a copy and apply the threshold
+    binary_output = np.zeros_like(scaled_sobel)
+    # Here I'm using inclusive (>=, <=) thresholds, but exclusive is ok too
+    binary_output[(scaled_sobel >= thresh[0]) & (scaled_sobel <= thresh[1])] = 1
+    print('abs_sobel_thresh')
+    plt.imshow(binary_output)
+    plt.show()
+
+    # Return the result
+    return binary_output
+
+def mag_thresh(img, sobel_kernel=3, mag_thresh=(200, 255)):
+    # Convert to grayscale
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    # Take both Sobel x and y gradients
+    sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=sobel_kernel)
+    sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=sobel_kernel)
+    # Calculate the gradient magnitude
+    gradmag = np.sqrt(sobelx**2 + sobely**2)
+    # Rescale to 8 bit
+    scale_factor = np.max(gradmag)/255 
+    gradmag = (gradmag/scale_factor).astype(np.uint8) 
+    # Create a binary image of ones where threshold is met, zeros otherwise
+    binary_output = np.zeros_like(gradmag)
+    binary_output[(gradmag >= mag_thresh[0]) & (gradmag <= mag_thresh[1])] = 1
+    
+    print('mag_thresh')
+    plt.imshow(binary_output)
+    plt.show()
+    
+    # Return the binary image
+    return binary_output
+
+def dir_threshold(img, sobel_kernel=3, thresh=(0, np.pi/2)):
+    # Grayscale
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    # Calculate the x and y gradients
+    sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0, ksize=sobel_kernel)
+    sobely = cv2.Sobel(gray, cv2.CV_64F, 0, 1, ksize=sobel_kernel)
+    # Take the absolute value of the gradient direction, 
+    # apply a threshold, and create a binary image result
+    absgraddir = np.arctan2(np.absolute(sobely), np.absolute(sobelx))
+    binary_output =  np.zeros_like(absgraddir)
+    binary_output[(absgraddir >= thresh[0]) & (absgraddir <= thresh[1])] = 1
+
+    # Return the binary image
+    return binary_output
+
+def sobrel_calculation(frame,thresh_min,thresh_max):
+        #grayscale image frame
+        #use to calculate sobel gradient frame
+        gray = cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY)
+        
+        #calculate the gradient of the grayscale image
+        sobelx = cv2.Sobel(gray, cv2.CV_64F, 1, 0) # Take the derivative in x
+        abs_sobelx = np.absolute(sobelx) # Absolute x derivative to accentuate lines away from horizontal
+        scaled_sobel = np.uint8(255*abs_sobelx/np.max(abs_sobelx))
+        
+        # Threshold x gradient
+        sxbinary = np.zeros_like(scaled_sobel)
+        sxbinary[(scaled_sobel >= thresh_min) & (scaled_sobel <= thresh_max)] = 1
+        
+        return sxbinary
+
+def warper(img, src, dst):
+
+    # Compute and apply perpective transform
+    img_size = (img.shape[1], img.shape[0])
+    M = cv2.getPerspectiveTransform(src, dst)
+    Minv = cv2.getPerspectiveTransform(dst,src)
+    warped = cv2.warpPerspective(img, M, img_size, flags=cv2.INTER_NEAREST)  # keep same size as input image
+
+    return warped, M, Minv
+
+def window_mask(width, height, img_ref, center,level):
+    output = np.zeros_like(img_ref)
+    output[int(img_ref.shape[0]-(level+1)*height):int(img_ref.shape[0]-level*height),max(0,int(center-width/2)):min(int(center+width/2),img_ref.shape[1])] = 1
+    return output
+
+def find_window_centroids(image, window_width, window_height, margin):
+    
+    window_centroids = [] # Store the (left,right) window centroid positions per level
+    window = np.ones(window_width) # Create our window template that we will use for convolutions
+    
+    # First find the two starting positions for the left and right lane by using np.sum to get the vertical image slice
+    # and then np.convolve the vertical image slice with the window template 
+    
+    # Sum quarter bottom of image to get slice, could use a different ratio
+    l_sum = np.sum(image[int(3*image.shape[0]/4):,:int(image.shape[1]/2)], axis=0)
+    l_center = np.argmax(np.convolve(window,l_sum))-window_width/2
+    r_sum = np.sum(image[int(3*image.shape[0]/4):,int(image.shape[1]/2):], axis=0)
+    r_center = np.argmax(np.convolve(window,r_sum))-window_width/2+int(image.shape[1]/2)
+    
+    # Add what we found for the first layer
+    window_centroids.append((l_center,r_center))
+    
+    # Go through each layer looking for max pixel locations
+    for level in range(1,(int)(image.shape[0]/window_height)):
+        # convolve the window into the vertical slice of the image
+        image_layer = np.sum(image[int(image.shape[0]-(level+1)*window_height):int(image.shape[0]-level*window_height),:], axis=0)
+        conv_signal = np.convolve(window, image_layer)
+        # Find the best left centroid by using past left center as a reference
+        # Use window_width/2 as offset because convolution signal reference is at right side of window, not center of window
+        offset = window_width/4
+        l_min_index = int(max(l_center+offset-margin,0))
+        l_max_index = int(min(l_center+offset+margin,image.shape[1]))
+        l_center = np.argmax(conv_signal[l_min_index:l_max_index])+l_min_index-offset
+        # Find the best right centroid by using past right center as a reference
+        r_min_index = int(max(r_center+offset-margin,0))
+        r_max_index = int(min(r_center+offset+margin,image.shape[1]))
+        r_center = np.argmax(conv_signal[r_min_index:r_max_index])+r_min_index-offset
+        # Add what we found for that layer
+        window_centroids.append((l_center,r_center))
+
+    return window_centroids
+
+def find_lane_pixels(binary_warped):
+    # Take a histogram of the bottom half of the image
+    histogram = np.sum(binary_warped[binary_warped.shape[0]//2:,:], axis=0)
+    # Create an output image to draw on and visualize the result
+    out_img = np.dstack((binary_warped, binary_warped, binary_warped))
+    # Find the peak of the left and right halves of the histogram
+    # These will be the starting point for the left and right lines
+    midpoint = np.int(histogram.shape[0]//2)
+    leftx_base = np.argmax(histogram[:midpoint])
+    rightx_base = np.argmax(histogram[midpoint:]) + midpoint
+
+    # HYPERPARAMETERS
+    # Choose the number of sliding windows
+    nwindows = 9
+    # Set the width of the windows +/- margin
+    margin = 100
+    # Set minimum number of pixels found to recenter window
+    minpix = 50
+
+    # Set height of windows - based on nwindows above and image shape
+    window_height = np.int(binary_warped.shape[0]//nwindows)
+    # Identify the x and y positions of all nonzero pixels in the image
+    nonzero = binary_warped.nonzero()
+    nonzeroy = np.array(nonzero[0])
+    nonzerox = np.array(nonzero[1])
+    # Current positions to be updated later for each window in nwindows
+    leftx_current = leftx_base
+    rightx_current = rightx_base
+
+    # Create empty lists to receive left and right lane pixel indices
+    left_lane_inds = []
+    right_lane_inds = []
+
+    # Step through the windows one by one
+    for window in range(nwindows):
+        # Identify window boundaries in x and y (and right and left)
+        win_y_low = binary_warped.shape[0] - (window+1)*window_height
+        win_y_high = binary_warped.shape[0] - window*window_height
+        win_xleft_low = leftx_current - margin
+        win_xleft_high = leftx_current + margin
+        win_xright_low = rightx_current - margin
+        win_xright_high = rightx_current + margin
+        
+        # Draw the windows on the visualization image
+        cv2.rectangle(out_img,(win_xleft_low,win_y_low),
+        (win_xleft_high,win_y_high),(0,255,0), 2) 
+        cv2.rectangle(out_img,(win_xright_low,win_y_low),
+        (win_xright_high,win_y_high),(0,255,0), 2) 
+        
+        # Identify the nonzero pixels in x and y within the window #
+        good_left_inds = ((nonzeroy >= win_y_low) & (nonzeroy < win_y_high) & 
+        (nonzerox >= win_xleft_low) &  (nonzerox < win_xleft_high)).nonzero()[0]
+        good_right_inds = ((nonzeroy >= win_y_low) & (nonzeroy < win_y_high) & 
+        (nonzerox >= win_xright_low) &  (nonzerox < win_xright_high)).nonzero()[0]
+        
+        # Append these indices to the lists
+        left_lane_inds.append(good_left_inds)
+        right_lane_inds.append(good_right_inds)
+        
+        # If you found > minpix pixels, recenter next window on their mean position
+        if len(good_left_inds) > minpix:
+            leftx_current = np.int(np.mean(nonzerox[good_left_inds]))
+        if len(good_right_inds) > minpix:        
+            rightx_current = np.int(np.mean(nonzerox[good_right_inds]))
+
+    # Concatenate the arrays of indices (previously was a list of lists of pixels)
+    try:
+        left_lane_inds = np.concatenate(left_lane_inds)
+        right_lane_inds = np.concatenate(right_lane_inds)
+    except ValueError:
+        # Avoids an error if the above is not implemented fully
+        pass
+
+    # Extract left and right line pixel positions
+    leftx = nonzerox[left_lane_inds]
+    lefty = nonzeroy[left_lane_inds] 
+    rightx = nonzerox[right_lane_inds]
+    righty = nonzeroy[right_lane_inds]
+    
+    ## Visualization ##
+    # Colors in the left and right lane regions
+    out_img[lefty, leftx] = [255, 0, 0]
+    out_img[righty, rightx] = [0, 0, 255]
+
+    return leftx, lefty, rightx, righty, out_img
+
+
+def fit_polynomial(binary_warped):
+    # Find our lane pixels first
+    binary_warped = region_of_interest(binary_warped,vertices)
+    print('Region of Interest Warped')
+    plt.imshow(binary_warped)
+    plt.show()
+    
+    leftx, lefty, rightx, righty, out_img = find_lane_pixels(binary_warped)
+    
+    # Fit a second order polynomial to each using `np.polyfit`
+    left_fit = np.polyfit(lefty, leftx, 2)
+    right_fit = np.polyfit(righty, rightx, 2)
+
+    # Generate x and y values for plotting
+    ploty = np.linspace(0, binary_warped.shape[0]-1, binary_warped.shape[0] )
+    #ploty = np.linspace(0, 100, num=101)*7.2
+    try:
+        left_fitx = left_fit[0]*ploty**2 + left_fit[1]*ploty + left_fit[2]
+        right_fitx = right_fit[0]*ploty**2 + right_fit[1]*ploty + right_fit[2]
+    except TypeError:
+        # Avoids an error if `left` and `right_fit` are still none or incorrect
+        print('The function failed to fit a line!')
+        left_fitx = 1*ploty**2 + 1*ploty
+        right_fitx = 1*ploty**2 + 1*ploty
+
+    ## Visualization ##
+    # Colors in the left and right lane regions
+    out_img[lefty, leftx] = [255, 0, 0]
+    out_img[righty, rightx] = [0, 0, 255]
+
+    # Plots the left and right polynomials on the lane lines
+    plt.plot(left_fitx, ploty, color='green')
+    plt.plot(right_fitx, ploty, color='green')
+
+    return leftx, lefty, rightx, righty, out_img, left_fit, right_fit, ploty, left_fitx, right_fitx
+
+def process_frame(image):
+
+    print('Original Frame')
+    plt.imshow(image)
+    plt.show()
+    
+    #undistort the images
+    undistorted_frame = undistort_input_images(image, mtx, dist,rvecs,tvecs)
+    print('Undistorted Frame')
+    plt.imshow(undistorted_frame)
+    plt.show()
+    
+    s_binary = hls_extraction(undistorted_frame, s_thresh_min,s_thresh_max)
+    #sxbinary = sobrel_calculation(undistorted_frame,thresh_min,thresh_max)
+#    sxbinary= mag_thresh(undistorted_frame)
+    print('S_Binary Frame')
+    plt.imshow(s_binary)
+    plt.show()
+    
+    # Choose a Sobel kernel size
+    ksize = 3 # Choose a larger odd number to smooth gradient measurements
+
+    # Apply each of the thresholding functions
+    gradx = abs_sobel_thresh(image, orient='x', sobel_kernel=ksize, thresh=(60, 250))
+    grady = abs_sobel_thresh(image, orient='y', sobel_kernel=ksize, thresh=(40, 255))
+    mag_binary = mag_thresh(image, sobel_kernel=ksize, mag_thresh=(100, 255))
+    dir_binary = dir_threshold(image, sobel_kernel=ksize, thresh=(0.65, 1.05))#np.pi/2))
+    
+    sxbinary = np.zeros_like(dir_binary)
+    sxbinary[((gradx == 1) & (grady == 1)) | ((mag_binary == 1) & (dir_binary == 1))] = 1
+    
+    print('Sx_Binary Frame')
+    plt.imshow(sxbinary)
+    plt.show()
+        
+    ###  produce both grayscale and HLS frames to produce composite images
+    ###
+    ### Stack each channel to view their individual contributions in green and blue respectively
+    ### This returns a stack of the two binary images, whose components you can see as different colors
+    color_binary = np.dstack(( np.zeros_like(sxbinary), sxbinary, s_binary)) #* 255
+
+    # Plotting thresholded undistorted images
+    f, (ax1, ax2) = plt.subplots(1, 2, figsize=(20,10))
+    ax1.set_title('Stacked thresholds')
+    ax1.imshow(color_binary)
+    #plt.imshow(color_binary)
+    #plt.show()
+    
+    # Combine the two binary thresholds
+    combined_binary = np.zeros_like(sxbinary)
+    combined_binary[(s_binary == 1) | (sxbinary == 1)] = 1
+    
+    ax2.set_title('Combined S channel and gradient thresholds')
+    ax2.imshow(combined_binary, cmap='gray')
+    plt.imshow(combined_binary)
+    plt.show() 
+    
+    
+#    plt.imshow(combined_binary)
+#    plt.plot(540,500, ".")
+#    plt.plot(800,500, ".")
+#    plt.plot(300,720, ".")
+#    plt.plot(1200,720, ".")
+    
+    ####   return combined_binary
+    ####   perspective tranform
+    ####   get birds eye view of lane markings so that we can use to calculate curvature
+    warped_image, M, Minv = warper(combined_binary, src, dst)
+    #warped_image = warper(color_binary, src, dst)
+    print('Warped Image')
+    plt.imshow(warped_image)
+    plt.show() 
+    
+    ####   Determine left and right lane lines and fit polynomial
+    ####   leftx, lefty, rightx, righty, out_img = find_lane_pixels(warped_image)
+    
+    
+    leftx, lefty, rightx, righty, out_img, left_fit, right_fit, ploty,left_fitx, right_fitx = fit_polynomial(warped_image)
+    print('Detected Lane Lines')
+    plt.imshow(out_img)
+    plt.show()
+    
+    ####  Visualization ##
+    ####  Colors in the left and right lane regions
+    out_img[lefty, leftx] = [255, 0, 0]
+    out_img[righty, rightx] = [0, 0, 255]
+    
+    #calculate the radius and center
+    left_curverad, right_curverad = calculate_curvature(left_fit,right_fit,ploty)
+    print(left_curverad)
+    print(right_curverad)
+    
+    #undistorted_frame = warper(undistorted_frame,dst,src)
+    out_img = warper(out_img,dst,src)
+   
+    # Create an image to draw the lines on
+    null_image = np.zeros_like(warped_image).astype(np.uint8)
+    colored_null = np.dstack((null_image, null_image, null_image))
+    # Recast the x and y points into usable format for cv2.fillPoly()
+    pts_left = np.array([np.transpose(np.vstack([left_fitx, ploty]))])
+    pts_right = np.array([np.flipud(np.transpose(np.vstack([right_fitx, ploty])))])
+    pts = np.hstack((pts_left, pts_right))
+    
+    # Draw the lane onto the warped blank image
+    cv2.fillPoly(colored_null, np.int_([pts]), (0, 255, 0))
+    # Warp the blank back to original image space using inverse perspective matrix (Minv)
+    newwarp = cv2.warpPerspective(colored_null, Minv,(undistorted_frame.shape[1], undistorted_frame.shape[0]))
+    #cv2.warpPerspective(colored_null, Minv, (img.shape[1], img.shape[0]))
+    
+    #result = cv2.addWeighted(out_img,0.8,undistorted_frame,0.8, 0)
+    result = cv2.addWeighted(newwarp,0.8,undistorted_frame,0.8, 0)
+
+    
+    #return undistorted_frame
+    #putText(img, text, textOrg, fontFace, fontScale, Scalar::all(255), thickness, 8);
+    #cv2.putText(result,'Radius of Curvature = ', (500,500), FONT_HERSHEY_SIMPLEX, )
+    cv2.putText(result,'Radius of Curvature = ', (200, 100), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 255, 255), lineType=cv2.LINE_AA) 
+    cv2.putText(result,'Vehicle is $$$ of center', (200, 200), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (255, 255, 255), lineType=cv2.LINE_AA) 
+
+    print('Final Result')
+    plt.imshow(result)
+    plt.show()
+    return result
+    
+    def main():
+
+
+    
+    ###
+    # add if condition for videos and images
+    # add input parameter for user specified file
+    ###
+    video_output_file = 'Output_video.mp4'
+
+    #input video/images
+    input_video = VideoFileClip("project_video.mp4").subclip(0,4)
+    new_frame = input_video.fl_image(process_frame) #NOTE: this function expects color images!!
+    
+    %time new_frame.write_videofile(video_output_file, audio=False)
+    #HTML("""<video width="960" height="540" controls><source src="{0}"></video>""".format(video_output_file))
