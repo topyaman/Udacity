@@ -462,6 +462,18 @@ def fit_polynomial(binary_warped):
 
     return leftx, lefty, rightx, righty, out_img, left_fit, right_fit, ploty, left_fitx, right_fitx
 
+
+def calculate_curvature(left_fit,right_fit,ploty):
+
+    y_eval = np.max(ploty)
+    y_eval = y_eval * ym_per_pix
+    # Calculation of R_curve (radius of curvature)
+    left_curverad = ((1 + (2*left_fit[0]*y_eval + left_fit[1])**2)**1.5) / np.absolute(2*left_fit[0])
+    right_curverad = ((1 + (2*right_fit[0]*y_eval + right_fit[1])**2)**1.5) / np.absolute(2*right_fit[0])
+    
+    return left_curverad, right_curverad
+
+
 def process_frame(image):
 
     print('Original Frame')
